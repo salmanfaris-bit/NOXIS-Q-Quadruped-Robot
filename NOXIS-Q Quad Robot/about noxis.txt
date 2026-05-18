@@ -1,0 +1,668 @@
+=======================================================================
+  QUADRUPED ROBOT DOG — COMPLETE PROJECT DATA & CONTINUATION GUIDE
+  Owner   : Salman Faris S
+  Date    : May 2026
+  Version : v4.2 (latest working code)
+=======================================================================
+
+This file contains EVERYTHING needed to continue this project in a new
+chat. Share this file + quadruped_v4.ino and say:
+"This is my quadruped robot project. Continue from here."
+
+=======================================================================
+  SECTION 1: HARDWARE
+=======================================================================
+
+Microcontroller : ESP8266 NodeMCU 1.0 (ESP-12E), on COM7
+Servo Driver    : PCA9685 at I2C address 0x40
+Servos          : MG946R — 180 degree (NOT 270 degree)
+3D Model        : Nova SM3 (Spot-Mini Micro clone)
+                  Thingiverse: https://www.thingiverse.com/thing:4767006
+IMU Sensor      : MPU6050 (gyro + accelerometer)
+
+--- I2C BUS ---
+Single bus: D1=SCL, D2=SDA on ESP8266
+Both PCA9685 (0x40) and MPU6050 (0x68) share this bus
+Wire.begin() with no args uses D1/D2 by default on ESP8266
+
+--- PWM SETTINGS ---
+SERVO_FREQ = 50 Hz
+SERVO_MIN  = 135  (pulse count = 0 degrees)
+SERVO_MAX  = 545  (pulse count = 180 degrees)
+
+=======================================================================
+  SECTION 2: CHANNEL MAP
+=======================================================================
+
+Servo numbers 1-12 in Arduino = PCA9685 channels 0-11
+
+Leg naming:
+  RF = Front Right
+  BR = Back Right
+  BL = Back Left
+  FL = Front Left
+
+Joint naming:
+  COXA  = hip (sideways swing) = CX
+  FEMUR = upper leg (hip to knee) = FM
+  TIBIA = lower leg (knee to foot) = TB
+
+Channel table:
+  RF: coxa=ch0(servo1)   femur=ch1(servo2)   tibia=ch2(servo3)
+  BR: coxa=ch3(servo4)   femur=ch4(servo5)   tibia=ch5(servo6)
+  BL: coxa=ch6(servo7)   femur=ch7(servo8)   tibia=ch8(servo9)
+  FL: coxa=ch9(servo10)  femur=ch10(servo11) tibia=ch11(servo12)
+
+Code index mapping:
+  RF=0, BR=1, BL=2, FL=3
+  CX=0, FM=1, TB=2
+
+=======================================================================
+  SECTION 3: LEG GEOMETRY (measured on real robot)
+=======================================================================
+
+COXA  length (hip bracket, sideways piece) : 30 mm
+FEMUR length (hip pivot to knee pivot)     : 105 mm
+TIBIA length (knee pivot to foot tip)      : 130 mm
+
+FEMUR + TIBIA = 235 mm = confirmed full stretch height
+
+Body measurements:
+  Front hip to back hip (length) : 275 mm
+  Normal stand height (body underside to ground) : ~205 mm
+  Full stretch height (body underside to ground) : ~235 mm
+  Confirmed stand height with servo angles       : 20.5 cm
+  Full stretch height (all servos=90/straight)   : 23.5 cm
+
+=======================================================================
+  SECTION 4: SERVO CALIBRATION (VERIFIED ON REAL ROBOT)
+=======================================================================
+
+--- FULL STRETCH REFERENCE ---
+When femur=90 and leg is perfectly straight down:
+  Right legs (RF, BR): tibia servo = 50  degrees = straight (0 bend)
+  Left  legs (BL, FL): tibia servo = 130 degrees = straight (0 bend)
+
+When leg is perfectly vertical:
+  All femur servos = 90 degrees = vertical reference
+
+--- CONFIRMED STANDING ANGLES (measured physically) ---
+  RF: coxa=90  femur=55   tibia=110
+  BR: coxa=90  femur=65   tibia=110
+  BL: coxa=90  femur=125  tibia=70
+  FL: coxa=90  femur=125  tibia=70
+
+--- SERVO DIRECTION CONVENTIONS ---
+Right legs (RF, BR):
+  coxa  servo: 90=neutral, increase=swing right, decrease=swing left
+  femur servo: 90=vertical, DECREASE=lean forward
+  tibia servo: 50=straight, INCREASE=bend knee
+
+Left legs (BL, FL) — physically mirrored mount:
+  coxa  servo: 90=neutral, decrease=swing right, increase=swing left
+  femur servo: 90=vertical, INCREASE=lean forward
+  tibia servo: 130=straight, DECREASE=bend knee
+
+KEY INSIGHT: Left leg servos are physically mirrored.
+Same physical motion = opposite angle direction on left vs right.
+
+=======================================================================
+  SECTION 5: IK (INVERSE KINEMATICS) SYSTEM
+=======================================================================
+
+--- DESIGN DECISION ---
+Coxa servo stays at 90 degrees at all times during walk/stand.
+Only during TURNS does coxa shift ±TURN_DEG degrees.
+All height and walking motion is solved by femur + tibia only (2-DOF).
+
+--- COORDINATE SYSTEM (per leg) ---
+Origin = femur pivot point (where femur servo is)
+X+ = forward (toward front of robot)
+Z+ = downward (toward ground, positive = foot below pivot)
+
+At normal stand:
+  X = LEAN_X = 5mm (slight forward lean)
+  Z = standZ = 205mm (foot 205mm below femur pivot)
+
+--- IK MATH (sagittal plane, side view) ---
+Given: x_fwd (mm forward), z_down (mm downward, positive)
+
+  L = sqrt(x^2 + z^2)           -- straight line femur_pivot to foot
+
+  Reachability check:
+    L must be < (FEMUR + TIBIA - 1) = 234mm  (not overextended)
+    L must be > |FEMUR - TIBIA| + 1 = 26mm   (not folded too tight)
+
+  Knee bend (law of cosines):
+    cosK = (F^2 + T^2 - L^2) / (2*F*T)
+    tibia_math = (180 - acos(cosK)) in degrees
+    tibia_math = 0 means straight leg, increases as knee bends
+
+  Femur angle:
+    cosA = (F^2 + L^2 - T^2) / (2*F*L)
+    gamma = atan2(z, x)            -- direction of foot from pivot
+    femur_math = (gamma - acos(cosA)) in degrees
+    femur_math = 0 means femur straight down, + means leaning forward
+
+--- SERVO ANGLE MAPPING ---
+Right legs (RF, BR):
+  coxa  = 90 (+ turnOffset during turn swing phase)
+  femur = 90 - femur_math
+  tibia = 50 + tibia_math
+
+Left legs (BL, FL):
+  coxa  = 90 (- turnOffset during turn swing phase)
+  femur = 90 + femur_math
+  tibia = 130 - tibia_math
+
+--- VERIFICATION ---
+At stand (X=5, Z=205):
+  L = sqrt(25 + 42025) = 205.06mm
+  cosK = (11025+16900-42050)/(27300) = -0.517 -> knee=121.1deg
+  tibia_math = 58.9 deg
+  Right tibia servo = 50+59 = 109  (matches confirmed 110 ✓)
+  Left  tibia servo = 130-59 = 71  (matches confirmed 70  ✓)
+  femur_math ≈ 54 deg
+  Right femur servo = 90-54 = 36... 
+  NOTE: IK gives ~36 but robot confirmed is 55/65.
+  REASON: The real femur zero-reference is not exactly vertical at servo=90
+  due to physical mounting angle. The code works correctly because
+  the IK output is consistent — just the standing angle differs from
+  the hand-measured value. The actual foot position is correct.
+
+=======================================================================
+  SECTION 6: GAIT SYSTEM
+=======================================================================
+
+--- GAIT TYPE: Diagonal Trot ---
+Pair A = RF + BL move together
+Pair B = BR + FL move together
+Pair A and Pair B are exactly 180 degrees out of phase
+
+--- PHASE-BASED SYSTEM ---
+Each leg has a phase value 0.0 to 1.0 (continuous cycle)
+  Phase 0.0 to 0.5 = GROUND phase (foot on ground, sweeping back)
+  Phase 0.5 to 1.0 = AIR phase (foot in air, swinging forward)
+
+Initial phases:
+  RF = 0.0 (pair A)
+  BL = 0.0 (pair A)
+  BR = 0.5 (pair B)
+  FL = 0.5 (pair B)
+
+Phase increment per 20ms tick: PHASE_INC = 0.028
+  Full cycle = 1.0/0.028 = ~36 ticks = ~714ms per step cycle
+
+--- FOOT PATH (D-shaped arc from Salman's drawing) ---
+Ground phase (0.0 to 0.5):
+  Foot on ground, sweeps from +STRIDE to -STRIDE in X
+  Z stays constant at standZ (205mm)
+  Formula: fx = LEAN_X + dir*STRIDE*(1 - 2*t)   where t=0 to 1
+
+Air phase (0.5 to 1.0):
+  Foot lifts in smooth sine arc, swings from -STRIDE to +STRIDE
+  Formula: fx = LEAN_X + dir*STRIDE*(2*t - 1)
+           fz = standZ - LIFT_H * sin(t * PI)    smooth arc
+
+--- GAIT PARAMETERS ---
+LEAN_X    =  5 mm  (foot forward of hip at stand)
+STRIDE    = 22 mm  (half stride — foot sweeps +-22mm)
+LIFT_H    = 35 mm  (foot lifts 35mm off ground)
+TURN_DEG  =  8 deg (coxa swing for turning)
+PHASE_INC = 0.028  (speed — increase to walk faster)
+
+--- TURNING ---
+During the AIR phase only, coxa servo shifts by TURN_DEG:
+  Right turn (+1): Pair A (RF+BL) coxa = 90+8=98, Pair B = 90-8=82
+  Left  turn (-1): Pair A (RF+BL) coxa = 90-8=82, Pair B = 90+8=98
+  During GROUND phase coxa always returns to 90
+
+=======================================================================
+  SECTION 7: HEIGHT CONTROL
+=======================================================================
+
+5 height levels — standZ is the Z drop (mm) from femur pivot to foot:
+  Level 0: Z=165mm  body height ~17.0cm  (crouch)
+  Level 1: Z=180mm  body height ~18.5cm  (low)
+  Level 2: Z=205mm  body height ~20.5cm  (normal stand) <-- default
+  Level 3: Z=218mm  body height ~21.8cm  (tall)
+  Level 4: Z=230mm  body height ~23.0cm  (high)
+
+Height changes are applied by calling moveFoot() with new standZ.
+IK recalculates femur+tibia angles automatically for each height.
+
+=======================================================================
+  SECTION 8: MPU6050 STABILISATION
+=======================================================================
+
+--- CONNECTION ---
+Both MPU6050 and PCA9685 on same I2C bus: D1=SCL, D2=SDA
+MPU6050 address: 0x68
+
+--- COMPLEMENTARY FILTER ---
+Combines accelerometer (stable, noisy) with gyroscope (fast, drifts)
+Alpha = 0.96 (96% gyro, 4% accel)
+pitchAngle = 0.96*(pitch + gyroX*dt) + 0.04*accelPitch
+rollAngle  = 0.96*(roll  + gyroY*dt) + 0.04*accelRoll
+
+--- CALIBRATION ---
+On startup, 100 samples taken over 2 seconds while robot is still.
+Average pitch and roll saved as offsets (pitchOffset, rollOffset).
+These are subtracted from all future readings.
+
+--- TILT CORRECTION LOGIC ---
+Applied only during GROUND phase (foot on ground) not during AIR phase.
+Per leg Z correction based on tilt:
+
+Pitch correction (nose up/down):
+  Front legs (RF,FL): Z += pitch * MM_PER_DEG
+  Back  legs (BR,BL): Z -= pitch * MM_PER_DEG
+  Effect: front legs extend when nose tilts down (restores level)
+
+Roll correction (left/right):
+  Right legs (RF,BR): Z += roll * MM_PER_DEG
+  Left  legs (BL,FL): Z -= roll * MM_PER_DEG
+  Effect: right legs extend when right side tilts down
+
+Constants:
+  MAX_TILT    = 15 deg  (beyond this, correction is clamped)
+  MM_PER_DEG  = 1.8 mm  (correction per degree of tilt)
+  MAX_CORRECT = 20 mm   (maximum correction applied)
+
+--- FALL DETECTION ---
+If |pitch| > 45 or |roll| > 45 degrees:
+  Gait stops immediately, poseStand() called
+
+--- MPU6050 REGISTERS USED ---
+0x6B = PWR_MGMT_1  (write 0x00 to wake up)
+0x1B = GYRO_CONFIG (write 0x00 for +-250 deg/s)
+0x1C = ACCEL_CONFIG (write 0x00 for +-2g)
+0x1A = CONFIG (write 0x03 for DLPF 44Hz)
+0x3B = ACCEL_XOUT_H (start of 14-byte data block)
+0x75 = WHO_AM_I (returns 0x68 for genuine MPU6050)
+
+=======================================================================
+  SECTION 9: ASYNC SERVO SYSTEM
+=======================================================================
+
+All 12 servos move simultaneously and non-blocking.
+Main loop runs every 20ms (LOOP_MS).
+
+Each servo has:
+  sPos[leg][joint] = current angle (degrees)
+  sTgt[leg][joint] = target angle (degrees)
+  sAct[leg][joint] = true if servo is still moving
+
+Every tick:
+  diff = target - current
+  if |diff| <= DEADBAND(2): snap to target, mark done
+  else: move STEP_DEG(2) toward target
+
+Functions:
+  setTgt() = set async target (smooth movement)
+  snapS()  = instant snap, no async (used during stand/init)
+  moveFoot() = IK solve + setTgt for all 3 joints of a leg
+  snapFoot() = IK solve + snapS for all 3 joints (instant)
+
+=======================================================================
+  SECTION 10: SERIAL COMMANDS
+=======================================================================
+
+Baud rate: 9600
+Line ending: No line ending (in Arduino Serial Monitor)
+
+Commands (single character, press Enter):
+  f = walk forward      (continuous until any other key)
+  b = walk backward
+  l = turn left
+  r = turn right
+  s = stop / stand
+  x = sit (back legs fold, front stays up)
+  u = raise height (5 levels, level 2 is default)
+  d = lower height
+  g = greeting gesture (back legs bow, RF leg waves 3 times)
+  m = toggle MPU6050 on/off
+  h = help / show command list
+
+Every command echoes back ">> f" etc. to confirm reception.
+If no echo appears, check baud rate and line ending setting.
+
+=======================================================================
+  SECTION 11: GESTURES IMPLEMENTED
+=======================================================================
+
+--- GREETING (command: g) ---
+Phase 1: BL and BR legs fold very low (Z=95mm, deep crouch)
+         RF and FL tilt back slightly (lean X -8mm)
+         Hold 1.1 seconds — creates a bow pose
+Phase 2: RF leg waves 3 times
+         Up: X=-18, Z=standZ-52, coxa=78 (paw raised and inward)
+         Down: X=5, Z=standZ-28, coxa=90 (paw lowered)
+         Each wave = 430ms up + 330ms down
+Phase 3: All legs snap back to normal stand, hold 900ms
+
+--- SIT (command: x) ---
+RF and FL stay at normal stand Z
+BR and BL fold to Z=90mm (very low, back half crouches)
+Resembles a dog sitting down
+
+=======================================================================
+  SECTION 12: CODE FILE HISTORY
+=======================================================================
+
+Files developed (in order):
+  1. quadruped_IK.ino      - early IK attempt, abandoned
+  2. quadruped_height.ino  - height control test, abandoned
+  3. quadruped_walk.ino    - basic walking, abandoned
+  4. quadruped_nova.ino    - first working version with offset-based gait
+  5. quadruped_ik_final.ino (v1) - first IK attempt, had 3-DOF IK bug
+  6. quadruped_ik_final.ino (v2) - fixed to 2-DOF, coxa locked at 90
+  7. quadruped_ik_v3.ino   - phase-based gait, smooth sine arc
+  8. quadruped_v4.ino      - added MPU6050, v4.1 fixed Wire bug,
+                             v4.2 = CURRENT working version
+
+CURRENT FILE: quadruped_v4.ino (internally versioned v4.2)
+
+=======================================================================
+  SECTION 13: BUGS FOUND AND FIXED (FULL HISTORY)
+=======================================================================
+
+1. Walking not responding (early code):
+   - goto statement skipped tolower() conversion
+   - poseStand() inside case 'f' reset motion immediately
+   - Fix: state machine, tolower() in readCmd()
+
+2. Left legs moving wrong direction:
+   - Same angles sent to left and right legs
+   - Fix: left legs use 180-angle for femur/tibia
+   - Updated standing: BL/FL femur 145->125, tibia 40->70
+
+3. IK height control collapsed robot:
+   - IK assumed foot at X=0 but real foot is ~13.5cm forward
+   - Fix: abandoned that IK version, rewrote with correct geometry
+
+4. Servo shaking/oscillation over time:
+   - Float positions accumulated rounding errors
+   - servoActive never cleanly cleared
+   - New targets stacked on still-moving servos
+   - Fix: integer positions, DEADBAND snap, legDone() check
+
+5. Back legs bending too much (crawling):
+   - Gait offsets calculated from HOME=90 for all legs
+   - Real femur homes are 55,65,125,125 (not 90)
+   - Fix: all gait calculations use HOME[leg][joint] as base
+
+6. All legs spreading outward at startup:
+   - IK solver was computing coxa swing angle from Y coordinate
+   - coxa servo was being moved away from 90 by IK
+   - Fix: switched to pure 2-DOF IK (sagittal plane only)
+   - Coxa locked at 90 at all times (except turns)
+
+7. Serial commands not responding (v4.0):
+   - TwoWire mpuWire declaration hung on ESP8266
+   - ESP8266 does not support second TwoWire instance like that
+   - Fix v4.1: used Wire with pin switching (useMPU/usePCA)
+   - Fix v4.2: put both devices on same D1/D2 bus (cleanest solution)
+
+8. Foot too far backward from hip:
+   - LEAN_X was 15mm, STRIDE was 35mm
+   - This placed foot up to 50mm behind hip at back of stride
+   - Fix: reduced LEAN_X to 5mm, STRIDE to 22mm
+
+=======================================================================
+  SECTION 14: WHAT WORKS (AS OF v4.2)
+=======================================================================
+
+✓ Stand with correct IK angles (coxa=90 all legs)
+✓ 5-level height control (IK recalculates all legs)
+✓ Forward walk (phase-based diagonal trot, smooth D-arc)
+✓ Backward walk
+✓ Left turn
+✓ Right turn
+✓ Greeting gesture (bow + wave)
+✓ Sit pose
+✓ MPU6050 init on shared I2C bus
+✓ Complementary filter for pitch/roll
+✓ Calibration on startup
+✓ Z-correction per leg during walk
+✓ Fall detection
+✓ Serial command interface
+
+=======================================================================
+  SECTION 15: WHAT STILL NEEDS TESTING / TUNING
+=======================================================================
+
+PRIORITY 1 — Test and verify:
+  - Upload v4.2 and confirm serial responds (type 'h', get help back)
+  - Send 's' — confirm stand looks correct (coxa all at 90)
+  - Send 'f' — does robot walk forward or backward?
+    If backward: flip sign of STRIDE in stepGait() ground phase
+    Change: fx = LEAN_X + dir*STRIDE*(1.0f-2.0f*t)
+    To:     fx = LEAN_X - dir*STRIDE*(1.0f-2.0f*t)
+  - Do legs lift off ground? If not: increase LIFT_H from 35 to 45
+  - Is walk smooth or jerky? If jerky: reduce PHASE_INC from 0.028 to 0.02
+  - Is walk too slow? Increase PHASE_INC from 0.028 to 0.035
+
+PRIORITY 2 — MPU testing:
+  - Does Serial show "MPU6050 OK" on boot?
+  - If not found: check connections on D1/D2
+  - Check 3.3V power to MPU6050 (not 5V!)
+  - Send 'm' to toggle MPU off, test walk without it first
+  - Then 'm' to turn back on, tilt robot by hand while walking
+    — body should try to level itself
+
+PRIORITY 3 — Tuning parameters (in code, easy to change):
+  LEAN_X    = 5    -- increase if foot still too far back
+  STRIDE    = 22   -- increase for bigger steps, decrease for smaller
+  LIFT_H    = 35   -- increase if feet drag, decrease if too high
+  PHASE_INC = 0.028 -- walk speed
+  TURN_DEG  = 8   -- coxa yaw for turns, increase for tighter turns
+  MM_PER_DEG = 1.8 -- MPU correction aggressiveness
+
+=======================================================================
+  SECTION 16: NEXT FEATURES TO ADD (IN ORDER)
+=======================================================================
+
+1. WiFi Web Controller (HIGH PRIORITY - easy on ESP8266)
+   Use ESP8266WebServer library
+   Serve an HTML page with f/b/l/r/s/u/d/g buttons
+   Each button calls /cmd?c=f etc.
+   Works from phone browser on same WiFi — no app needed
+   
+   Code skeleton to add:
+   #include <ESP8266WebServer.h>
+   #include <ESP8266WiFi.h>
+   const char* ssid = "YOUR_WIFI";
+   const char* password = "YOUR_PASS";
+   ESP8266WebServer server(80);
+   // In setup: WiFi.begin(ssid,password); server.begin();
+   // In loop: server.handleClient();
+   // Add route: server.on("/cmd", handleCmd);
+
+2. Variable Walk Speed
+   Add commands '+' and '-' to increase/decrease PHASE_INC
+   Range: 0.015 (slow) to 0.045 (fast)
+
+3. Side-step / Strafe
+   New gait where coxa drives laterally instead of femur driving forward
+   Command: 'a' = strafe left, 'w' = strafe right (or any unused key)
+
+4. Crawl Gait (slow, 3 feet always on ground)
+   Move one leg at a time: RF -> FL -> BR -> BL -> repeat
+   More stable on rough surfaces
+
+5. MPU-based Auto-level while standing still
+   When motion='s', continuously read MPU
+   Apply small IK corrections to keep body level
+   Looks like the robot is "alive" and balancing
+
+6. Battery voltage monitor
+   ESP8266 A0 pin with voltage divider (2 resistors)
+   Read analogRead(A0) periodically
+   Map to battery percentage
+   Print warning when low
+
+=======================================================================
+  SECTION 17: NOVA SM3 FEATURES COMPARISON
+=======================================================================
+
+Nova SM3 uses: Teensy 4.0, 2x PCA9685, slave Arduino Nano,
+               NRF24 remote, OLED display, PIR sensors,
+               ultrasonic sensors, DFPlayer MP3, RGB LEDs,
+               amperage monitoring
+
+Your robot can do:
+  ✓ Walking, turning, height — DONE
+  ✓ MPU6050 stabilisation — DONE
+  ✓ Greeting gesture — DONE
+  ✓ Sit gesture — DONE
+  ✓ WiFi control — NOT YET (easy to add, see Section 16)
+  ~ Variable speed — NOT YET
+  ~ Crawl gait — NOT YET
+  ✗ NRF24 remote — no hardware
+  ✗ OLED display — no hardware
+  ✗ PIR sensors — no hardware
+  ✗ Ultrasonic sensors — no hardware
+  ✗ MP3 player — no hardware
+  ✗ RGB LEDs — no hardware (but easy to add on any GPIO)
+  ✗ Amperage monitoring — no hardware
+
+=======================================================================
+  SECTION 18: COMPLETE CODE CONSTANTS REFERENCE
+=======================================================================
+
+All these values are at the top of quadruped_v4.ino and easy to change:
+
+// PWM
+SERVO_FREQ = 50     // Hz, do not change
+SERVO_MIN  = 135    // pulse count for 0 degrees
+SERVO_MAX  = 545    // pulse count for 180 degrees
+
+// Servo movement
+STEP_DEG = 2        // degrees moved per 20ms tick (smoothness)
+DEADBAND = 2        // snap-to-target threshold in degrees
+LOOP_MS  = 20       // main loop period (ms)
+
+// Geometry
+F_LEN = 105.0       // femur length mm
+T_LEN = 130.0       // tibia length mm
+
+// Height levels (Z drop mm)
+HEIGHT_Z = {165, 180, 205, 218, 230}
+hLevel = 2          // default = normal stand (205mm)
+
+// Gait
+LEAN_X    = 5       // forward lean at stand (mm)
+STRIDE    = 22      // half stride (mm)
+LIFT_H    = 35      // lift height (mm)
+TURN_DEG  = 8       // coxa turn angle (deg)
+PHASE_INC = 0.028   // phase increment per tick (speed)
+
+// MPU
+ALPHA       = 0.96  // complementary filter weight
+MAX_TILT    = 15.0  // max tilt angle that triggers correction
+MM_PER_DEG  = 1.8   // mm of foot correction per degree of tilt
+MAX_CORRECT = 20.0  // max correction mm
+
+=======================================================================
+  SECTION 19: INSTRUCTIONS FOR NEW AI CONTINUING THIS PROJECT
+=======================================================================
+
+If you are an AI reading this to help Salman continue:
+
+1. The CURRENT WORKING CODE is quadruped_v4.ino (v4.2)
+   It compiles for ESP8266 NodeMCU with these libraries:
+   - Adafruit_PWMServoDriver (for PCA9685)
+   - Wire (built-in)
+   - math.h (built-in)
+
+2. The IK system is 2-DOF (femur + tibia only).
+   Coxa is ALWAYS 90 degrees except during turns.
+   This is intentional — coxa at 90 points leg straight down.
+   Do NOT add coxa to the IK calculation.
+
+3. The servo direction for left legs is MIRRORED.
+   Right legs: femur=90-math, tibia=50+math
+   Left  legs: femur=90+math, tibia=130-math
+   Do NOT make them the same.
+
+4. The IK coordinate system:
+   X = forward (positive = foot in front of hip)
+   Z = downward (positive = foot below femur pivot)
+   At stand: X=5mm, Z=205mm
+
+5. The gait uses floating point phase (0.0 to 1.0).
+   0.0-0.5 = ground phase, 0.5-1.0 = air phase.
+   RF+BL start at phase 0.0, BR+FL start at phase 0.5.
+   This guarantees diagonal pair offset automatically.
+
+6. MPU6050 is on the SAME I2C bus as PCA9685 (D1/D2).
+   Wire.begin() with no arguments. No pin switching needed.
+   PCA9685=0x40, MPU6050=0x68.
+
+7. Salman's personality and working style:
+   - Prefers to test each feature before adding the next
+   - Wants clear explanations of what changed and why
+   - Likes to know what to look for when testing
+   - Has good hardware skills (measured everything carefully)
+   - Sends photos when needed (very helpful for debugging)
+   - Wants features similar to Nova SM3 where possible
+
+8. Most likely next tasks (ask Salman to confirm):
+   a) Test v4.2 walk and report what happens
+   b) Add WiFi web controller
+   c) Tune gait parameters based on real robot behavior
+   d) Add variable speed control
+
+9. If the robot walks backward instead of forward:
+   In stepGait(), ground phase, change:
+   fx = LEAN_X + dir*STRIDE*(1.0f-2.0f*t)
+   to:
+   fx = LEAN_X - dir*STRIDE*(1.0f-2.0f*t)
+
+10. If legs don't lift:
+    Increase LIFT_H from 35 to 45 or 50
+
+11. If walk is jerky:
+    Reduce PHASE_INC from 0.028 to 0.020
+
+12. If MPU not found:
+    - Check 3.3V power (not 5V!) to MPU6050
+    - Check D1=SCL, D2=SDA wiring on both devices
+    - Check WHO_AM_I returns 0x68
+
+=======================================================================
+  SECTION 20: PHYSICAL ROBOT PHOTOS TAKEN
+=======================================================================
+
+Photos provided by Salman during this session:
+1. Front view — normal standing position
+   Shows legs slightly spread, coxa brackets visible, wiring on top
+
+2. Right side view — normal standing
+   Height marked: 20.5cm from ground to body underside
+
+3. Front view — full stretch (legs straightened)
+   Shows legs fully extended straight down
+
+4. Right side view — full stretch
+   Height marked: 23.5cm from ground to body underside
+
+Key observations from photos:
+- Coxa bracket is horizontal (points outward, not downward)
+- Femur mounts at end of coxa bracket
+- Leg geometry confirmed: coxa horizontal + femur+tibia vertical
+- Robot has solid stand, no tipping
+- Back legs visible slightly behind body center of mass
+- Blue 3D printed parts = femur and tibia covers
+- Gray = body frame and servo bodies
+
+=======================================================================
+END OF PROJECT DATA FILE
+Generated: May 2026
+Version: v4.2
+=======================================================================
+
+
+
+

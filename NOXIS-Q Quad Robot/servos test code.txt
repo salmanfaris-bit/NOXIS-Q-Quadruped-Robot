@@ -1,0 +1,72 @@
+/*
+ Project: Quadruped Robot Dog
+ File: 01_servo_test.ino
+ Purpose: Manual servo testing and calibration using Serial commands.
+ Hardware: ESP8266 / Arduino + PCA9685
+ Author: Salman Faris S
+*/
+
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
+
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(0x40);
+
+#define SERVO_FREQ 50
+
+// 12 Servo channel definitions (0-indexed for PCA9685)
+#define S1  0
+#define S2  1
+#define S3  2
+#define S4  3
+#define S5  4
+#define S6  5
+#define S7  6
+#define S8  7
+#define S9  8
+#define S10 9
+#define S11 10
+#define S12 11
+
+int servoMin = 135;
+int servoMax = 545;
+
+void setServoAngle(uint8_t channel, int angle) {
+  angle = constrain(angle, 0, 180);
+  int pulse = map(angle, 0, 180, servoMin, servoMax);
+  pwm.setPWM(channel, 0, pulse);
+}
+
+void setup() {
+  Serial.begin(9600);
+
+  pwm.begin();
+  pwm.setPWMFreq(SERVO_FREQ);
+  delay(10);
+
+  Serial.println("=== Quadruped 12-Servo Test ===");
+  Serial.println("Enter: <servo> <angle>");
+  Serial.println("Servo range: 1-12 | Angle range: 0-180");
+  Serial.println("Example: 3 90");
+  Serial.println("================================");
+}
+
+void loop() {
+  if (Serial.available()) {
+    int servo = Serial.parseInt();
+    int angle = Serial.parseInt();
+
+    if (servo >= 1 && servo <= 12) {
+      setServoAngle(servo - 1, angle);  // Channel is 0-indexed
+      Serial.print("Servo ");
+      Serial.print(servo);
+      Serial.print(" -> ");
+      Serial.print(angle);
+      Serial.println(" deg");
+    } else {
+      Serial.println("Invalid servo number. Enter 1 to 12.");
+    }
+
+    // Clear buffer
+    while (Serial.available()) Serial.read();
+  }
+}
